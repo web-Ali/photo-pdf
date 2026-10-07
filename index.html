@@ -70,9 +70,9 @@
   <p class="sub">Все фото собираются в один PDF не больше заданного размера. Файлы никуда не загружаются, всё делается в браузере.</p>
 
   <label id="drop" class="drop">
-    <input type="file" id="file" accept="image/*" multiple hidden>
+    <input type="file" id="file" accept="image/*,.heic,.heif" multiple hidden>
     <strong>Нажмите, чтобы выбрать фото, или перетащите их сюда</strong>
-    <span>JPG, PNG, WEBP. Порядок страниц меняется перетаскиванием или стрелками</span>
+    <span>JPG, PNG, HEIC, WEBP. Порядок страниц меняется перетаскиванием или стрелками</span>
   </label>
 
   <div id="list" class="list"></div>
@@ -124,20 +124,57 @@ async function decode(file) {
   }
 }
 
+// HEIC (формат камеры iPhone) умеет открывать только Safari. В остальных браузерах
+// переводим его в JPEG декодером libheif — он грузится лишь при первом таком файле.
+const HEIC_LIB = 'https://cdn.jsdelivr.net/npm/heic-to@1.6.5/dist/iife/heic-to.js';
+let heicLib = null;
+function loadHeicLib() {
+  return heicLib ??= new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = HEIC_LIB;
+    s.onload = () => window.HeicTo ? res(window.HeicTo) : rej(new Error('heic lib'));
+    s.onerror = () => { heicLib = null; s.remove(); rej(new Error('heic lib')); };
+    document.head.appendChild(s);
+  });
+}
+
+async function isHeic(file) {
+  if (/\.(heic|heif)$/i.test(file.name) || /hei[cf]/i.test(file.type)) return true;
+  // расширение могли потерять при пересылке — смотрим сигнатуру файла (ftyp + бренд)
+  const b = new Uint8Array(await file.slice(0, 12).arrayBuffer());
+  const s = String.fromCharCode(...b.slice(4, 12));
+  return /^ftyp(heic|heix|hevc|hevx|heim|heis|mif1|msf1)/.test(s);
+}
+
+async function heicToJpeg(file) {
+  const HeicTo = await loadHeicLib();
+  const blob = await HeicTo({ blob: file, type: 'image/jpeg', quality: .95 });
+  return new File([blob], file.name.replace(/\.(heic|heif)$/i, '') + '.jpg', { type: 'image/jpeg' });
+}
+
 async function addFiles(files) {
   const bad = [];
+  let heicFailed = false;
   for (const f of files) {
     if (f.type && !f.type.startsWith('image/')) { bad.push(f.name); continue; }
+    let file = f, src;
     try {
-      const src = await decode(f);
+      try {
+        src = await decode(file);
+      } catch (e) {
+        if (!await isHeic(f)) throw e;
+        setStatus(`Конвертирую HEIC: ${esc(f.name)}…`);
+        try { file = await heicToJpeg(f); } catch (err) { heicFailed = true; throw err; }
+        src = await decode(file);
+      }
       const c = drawPage(src, 360, 0, false);
       src.close?.();
-      items.push({ id: ++nextId, file: f, rot: 0, thumb: c.toDataURL('image/jpeg', .75) });
+      items.push({ id: ++nextId, file, rot: 0, thumb: c.toDataURL('image/jpeg', .75) });
       render();
     } catch { bad.push(f.name); }
   }
-  if (bad.length) setStatus(`Не удалось открыть: ${bad.map(esc).join(', ')}. ` +
-    `Если это HEIC с iPhone, сохраните фото как JPG (или выберите «Наиболее совместимый» формат в настройках камеры).`, 'err');
+  if (bad.length) setStatus(`Не удалось открыть: ${bad.map(esc).join(', ')}.` +
+    (heicFailed ? ' Для фото HEIC нужен интернет при добавлении — проверьте подключение и попробуйте ещё раз.' : ''), 'err');
   else setStatus('');
 }
 
