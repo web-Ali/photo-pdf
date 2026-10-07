@@ -341,6 +341,25 @@ function jpgSize(b) {
   throw new Error('bad jpeg');
 }
 
+const IS_MOBILE = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) ||
+  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1); // iPad прикидывается Mac
+let lastFile = null;
+function canShareFile(file) {
+  try { return !!navigator.canShare?.({ files: [file] }); } catch { return false; }
+}
+
+statusEl.addEventListener('click', async e => {
+  if (!e.target.closest('[data-share]') || !lastFile) return;
+  try {
+    await navigator.share({ files: [lastFile], title: lastFile.name });
+  } catch (err) {
+    if (err.name === 'AbortError') return; // пользователь просто закрыл меню
+    // меню «Поделиться» недоступно — пробуем обычное скачивание
+    const a = document.createElement('a'); a.href = lastUrl; a.download = lastFile.name;
+    document.body.appendChild(a); a.click(); a.remove();
+  }
+});
+
 $('make').addEventListener('click', async () => {
   if (busy || !items.length) return;
   busy = true; render();
@@ -354,13 +373,26 @@ $('make').addEventListener('click', async () => {
     const name = ($('name').value.trim() || 'документ').replace(/[\\/:*?"<>|]+/g, '_').replace(/\.pdf$/i, '') + '.pdf';
     if (lastUrl) URL.revokeObjectURL(lastUrl);
     lastUrl = URL.createObjectURL(res.blob);
-    const a = document.createElement('a'); a.href = lastUrl; a.download = name;
-    document.body.appendChild(a); a.click(); a.remove();
+    lastFile = new File([res.blob], name, { type: 'application/pdf' });
+
+    // На телефонах отдаём файл через системное меню «Поделиться»: во встроенных браузерах
+    // (Telegram на iPhone и т.п.) обычное скачивание открывает ссылку blob:, а не сам файл.
+    // Меню можно открыть только по нажатию, поэтому показываем отдельную кнопку.
+    const share = IS_MOBILE && canShareFile(lastFile);
+    if (!share) {
+      const a = document.createElement('a'); a.href = lastUrl; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+    }
     const warn = res.side < READABLE_SIDE
       ? '<br>Фото пришлось заметно уменьшить, мелкий текст может читаться хуже. Попробуйте «Чёрно-белый скан» или разделите на 2 файла.' : '';
     setStatus(`Готово: <b>${esc(name)}</b>, ${items.length} стр., ${mb(res.blob.size)} ` +
-      `(${res.side}px, качество ${Math.round(res.q * 100)}%, ${((performance.now() - t0) / 1000).toFixed(1)} с). ` +
-      `<a href="${lastUrl}" target="_blank">Открыть</a> · <a href="${lastUrl}" download="${esc(name)}">Скачать ещё раз</a>${warn}`,
+      `(${res.side}px, качество ${Math.round(res.q * 100)}%, ${((performance.now() - t0) / 1000).toFixed(1)} с).` +
+      (share
+        ? `<div class="actions"><button class="primary" data-share>Поделиться / Сохранить PDF</button></div>`
+        : ` <a href="${lastUrl}" target="_blank">Открыть</a> · <a href="${lastUrl}" download="${esc(name)}">Скачать ещё раз</a>`) +
+      (IS_MOBILE && !share
+        ? '<br>Если файл не сохраняется, откройте эту страницу в Safari или Chrome (меню ⋯ → «Открыть в браузере»).' : '') +
+      warn,
       res.side < READABLE_SIDE ? 'err' : 'ok');
   } catch (e) {
     console.error(e);
